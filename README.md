@@ -43,3 +43,17 @@ Directory structure:
 1. If you feel the readme/notebook is too long, split it out logically.
 2. If you have split it out already, but too many sub-sections, eliminate the content that is not critical to our startup developers to launch your solution successfully and link in-depth content in the optimization/best practice section.
 3. Revisit our cookbook tenets and FAQs again, and make your judgement call.
+
+**How to create gifs in Mac**
+Using QuickTime Player:
+    Open your video in QuickTime Player .
+    Trim the video: to the desired section using Edit > Trim.
+    Go to File > Export > Export GIF .
+    Choose a location and filename: for the GIF.
+    Click "Save" . 
+
+**How to create a screen recording with some basic highlighting functions (e.g. zoom in, spotlight)**
+App: Pro Mouse ($3.99)
+Demo: https://www.youtube.com/watch?v=LzTkRq8lBqc
+If you use Pro Mouse or any App similar to this tool, change the customized color to Amazon orange to be consistent with each other.
+You don't have to use Pro Mouse though. As long as the console walkthough/demo is clear and easy for users to understand/follow, it works for the purpose of this cookbook.
