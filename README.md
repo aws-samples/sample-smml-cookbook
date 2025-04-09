@@ -45,14 +45,16 @@ Directory structure:
 3. Revisit our cookbook tenets and FAQs again, and make your judgement call.
 
 **How to create gifs in Mac**
+
 Using QuickTime Player:
-    Open your video in QuickTime Player .
-    Trim the video: to the desired section using Edit > Trim.
-    Go to File > Export > Export GIF .
-    Choose a location and filename: for the GIF.
-    Click "Save" . 
+1. Open your video in QuickTime Player .
+2. Trim the video: to the desired section using Edit > Trim.
+3. Go to File > Export > Export GIF .
+4. Choose a location and filename: for the GIF.
+5. Click "Save" . 
 
 **How to create a screen recording with some basic highlighting functions (e.g. zoom in, spotlight)**
+
 App: Pro Mouse ($3.99)
 Demo: https://www.youtube.com/watch?v=LzTkRq8lBqc
 If you use Pro Mouse or any App similar to this tool, change the customized color to Amazon orange to be consistent with each other.
