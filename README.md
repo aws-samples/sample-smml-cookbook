@@ -6,7 +6,7 @@ This is a WIP repo internally for team to work together for each section. Please
 
 ```
 Directory structure:
-└── aws-samples-database-cookbook/
+└── aws-samples-smml-cookbook/
     ├── README.md                        //Abstract of the cookbook, table of content for the cookbook, etc. -> this goes to the AWS documentation
     ├── CODE_OF_CONDUCT.md
     ├── CONTRIBUTING.md

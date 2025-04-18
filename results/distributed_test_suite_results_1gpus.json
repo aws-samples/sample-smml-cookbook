@@ -1,0 +1,15 @@
+[
+  {
+    "batch_size": 512,
+    "world_size": 1,
+    "D": 4096,
+    "F": 4096,
+    "num_layers": 5,
+    "avg_time_seconds": 0.0011149883270263673,
+    "local_gflops": 77040.5786660479,
+    "aggregated_gflops": 77040.578125,
+    "total_flops": 85899345920.0,
+    "estimated_memory_bytes": 209715200.0,
+    "arithmetic_intensity": 409.6
+  }
+]
