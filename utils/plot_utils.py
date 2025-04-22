@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 import ipywidgets as widgets
 from IPython.display import display, clear_output
 import random
-
+import json
 
 def plot_points_from_results(results, color=None):
     """
@@ -362,3 +362,18 @@ def launch_flashcard_quiz(results):
 
     next_question()
     display(quiz_ui)
+
+def plot_cost_vs_batch(results):
+    # Extract data
+    batch_sizes = [entry['batch_size'] for entry in results]
+    costs = [entry['cost_per_1m_tokens'] for entry in results]
+
+    # Create the plot
+    plt.figure()
+    plt.plot(batch_sizes, costs, marker='o')
+    plt.xlabel('Batch Size')
+    plt.ylabel('Cost per 1M Tokens ($)')
+    plt.title('Cost vs Batch Size')
+    plt.grid(True)
+    plt.xticks(batch_sizes)  # ensure all batch sizes are marked
+    plt.show()
