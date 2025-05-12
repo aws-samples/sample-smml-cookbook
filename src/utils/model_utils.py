@@ -15,6 +15,12 @@ import torch.multiprocessing as mp
 from multiprocessing import Manager
 import logging
 import transformers
+from math import ceil
+import multiprocessing.util
+import subprocess
+import psutil
+
+multiprocessing.util.log_to_stderr().setLevel("ERROR")
 
 def benchmark_batch_sizes(
     model_name: str,
@@ -22,9 +28,10 @@ def benchmark_batch_sizes(
     min_new_tokens: int,
     batch_sizes,
     dtype=torch.bfloat16,
-    sharding: str = "none",
+    sharding: bool = False,
     world_size: int = 1,
-    rank: int = 0
+    rank: int = 0,
+    ds_config: dict = {}
 ):
     """
     Run benchmarks across different batch sizes and return results.
@@ -34,7 +41,7 @@ def benchmark_batch_sizes(
     # Initialize distributed process group once
     if not dist.is_available():
         raise RuntimeError("Distributed package is not available")
-    if not dist.is_initialized():
+    if not dist.is_initialized() and world_size > 1:
         os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
         os.environ.setdefault("MASTER_PORT", "12355")
         dist.init_process_group(
@@ -44,19 +51,25 @@ def benchmark_batch_sizes(
         )
 
     results = []
+    model = load_sharded_model(model_name, dtype, sharding, world_size, ds_config)
+    if model == None:
+        return None
+    tok = AutoTokenizer.from_pretrained(model_name)
 
     for batch in batch_sizes:
         if rank == 0:
             print(f"\n🔁 Running batch size = {batch}")
 
         elapsed_s, tokens_generated, metrics, cost = benchmark_llm(
-            model_name=model_name,
+            model=model,
+            tok=tok,
             batch=batch,
             seq_len=seq_len,
             min_new_tokens=min_new_tokens,
             dtype=dtype,
             sharding=sharding,
-            world_size=world_size
+            world_size=world_size,
+            ds_config=ds_config
         )
         # if rank == 0:
         results.append({
@@ -78,132 +91,114 @@ def benchmark_batch_sizes(
 
     return results
 
+def _cleanup_all():
+    # 1) kill every child (and grandchild, etc.) of this process
+    parent = psutil.Process(os.getpid())
+    children = parent.children(recursive=True)
+    for child in children:
+        try:
+            child.terminate()   # polite SIGTERM
+        except psutil.NoSuchProcess:
+            pass
+    gone, alive = psutil.wait_procs(children, timeout=5)
+    for child in alive:
+        try:
+            child.kill()        # force SIGKILL if needed
+        except psutil.NoSuchProcess:
+            pass
+
+    # 2) tear down torch.distributed
+    if dist.is_initialized():
+        dist.destroy_process_group()
+
+    # 3) free GPU memory
+    torch.cuda.empty_cache()
+    torch.cuda.ipc_collect()
+    gc.collect()
 
 def load_sharded_model(
     model_name: str,
     dtype: torch.dtype,
-    sharding: Literal["none", "data", "fsdp", "tensor", "pipeline", "device_map"] = "none",
+    sharding: bool = False,
     world_size: int = 1,
-    seq_len: int = 1,
-    min_new_tokens: int = 1
+    ds_config: dict = {}
 ) -> torch.nn.Module:
-    """
-    Load a model with the specified sharding strategy.
+    try:
+        # single‑GPU path
+        if not sharding:
+            model = AutoModelForCausalLM.from_pretrained(
+                model_name, torch_dtype=dtype
+            )
+            model = model.to(torch.cuda.current_device()).eval()
+            return model
 
-    Args:
-        model_name: HF model ID
-        dtype: torch.float16 or torch.bfloat16
-        sharding: one of the supported modes
-        world_size: number of GPUs/processes
-
-    Returns:
-        Initialized and eval()'d model
-    """
-    redirect_output_to_file(int(os.environ.get("LOCAL_RANK", 0)))
-
-    # Single-GPU, no parallelism
-    if sharding == "none":
+        # DeepSpeed‑inference path
         model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            torch_dtype=dtype
-        ).to(torch.cuda.current_device()).eval()
-
-    # DataParallel: replicate model, shard input
-    elif sharding == "data":
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            torch_dtype=dtype
-        ).to(torch.cuda.current_device())
-        model = torch.nn.DataParallel(model).eval().module
-
-    # FSDP: fully shard parameters across ranks
-    elif sharding == "fsdp":
-        local_rank = int(os.environ.get("LOCAL_RANK", 0))
-        torch.cuda.set_device(local_rank)
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            torch_dtype=dtype
-        ).to(local_rank)
-        model = FSDP(model).eval()
-
-    # DeepSpeed inference: tensor parallel only
-    elif sharding == "tensor":
-        num_mp = world_size
-        max_tokens =  seq_len + min_new_tokens  # force planning for only what we need
-
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            torch_dtype=dtype
+            model_name, torch_dtype=dtype
         )
         model.eval()
-
-        ds_config = {
-            "replace_with_kernel_inject": True,
-            "enable_cuda_graph": False,
-            "tensor_parallel": {
-                "enabled": True,
-                "tp_size": num_mp
-            },
-            # Optional tuning knobs to constrain token planning
-            "max_tokens": max_tokens
-        }
-
-        model = deepspeed.init_inference(
+        ds_engine = deepspeed.init_inference(
             model,
             config=ds_config,
             dtype=dtype,
             replace_method="auto",
-            replace_with_kernel_inject=True
         )
+        return ds_engine.module
 
-    # Pipeline parallel unsupported in inference API
-    elif sharding == "pipeline":
-        raise NotImplementedError(
-            "DeepSpeed inference does not support pipeline parallelism; "
-            "use deepspeed.runtime.pipe.PipelineModule for pipeline execution."
-        )
+    except Exception as e:
+        _cleanup_all()
+        print(f"load failed: {e}")
+        return None
 
-    # Hugging Face Accelerate: device_map auto-sharding
-    elif sharding == "device_map":
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            torch_dtype=dtype,
-            device_map="auto"
-        ).eval()
-
-    else:
-        raise ValueError(f"Unsupported sharding strategy: {sharding}")
-
-    return model
-
+def shard_list(data, rank, world_size):
+    total = len(data)
+    shard_size = ceil(total / world_size)
+    start = rank * shard_size
+    end = min(start + shard_size, total)
+    return data[start:end]
 
 def benchmark_llm(
-    model_name: str,
+    model,
+    tok,
     batch: int,
     seq_len: int,
     min_new_tokens: int,
     dtype=torch.bfloat16,
-    sharding: str = "none",
-    world_size: int = 1
+    sharding: bool = False,
+    world_size: int = 1,
+    ds_config: dict = {}
 ):
     """
-    Benchmark a single forward pass (prompt + generation) on specified parallelism.
-    Returns elapsed GPU seconds, tokens generated, performance metrics, and cost.
+    Benchmark a single forward pass (prompt + generation) across multiple GPUs using data parallelism.
+    Returns elapsed GPU seconds (per rank), tokens generated (per rank), metrics, and cost.
     """
 
+    # Identify rank and device
+    rank = int(os.environ.get("LOCAL_RANK", 0))
+    device = torch.device(f"cuda:{rank}")
+    
     # Load tokenizer and model
-    tok = AutoTokenizer.from_pretrained(model_name)
+    
     tok.pad_token = tok.eos_token
-    model = load_sharded_model(model_name, dtype, sharding, world_size, seq_len, min_new_tokens)
+   
     model.config.use_cache = False
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.enabled = False
 
-    # Prepare prompt
-    prompt = tok.bos_token + ''.join(random.choices(string.ascii_letters, k=seq_len - 1))
-    device = next(model.parameters()).device
-    inputs = tok([prompt] * batch, return_tensors="pt", padding=True).to(device)
+    # Prepare rank-local prompts
+    prompts = [tok.bos_token + ''.join(random.choices(string.ascii_letters, k=seq_len - 1)) for _ in range(batch)]
+    
+    # Pad prompts so batch is divisible by world_size
+    if batch % world_size != 0:
+        pad = world_size - (batch % world_size)
+        for _ in range(pad):
+            prompts.append(prompts[-1])  # duplicate last
+
+    
+    local_prompts = shard_list(prompts, rank, world_size)
+    inputs = tok(local_prompts, return_tensors="pt", padding=True).to(device)
+    local_batch = len(local_prompts)
 
     # Warm-up
     with torch.inference_mode():
@@ -214,7 +209,7 @@ def benchmark_llm(
     # Simulate new tokens
     prompt_ids = torch.randint(
         1, tok.vocab_size - 1,
-        (batch, seq_len + min_new_tokens),
+        (local_batch, seq_len + min_new_tokens),
         device=device
     )
 
@@ -225,12 +220,36 @@ def benchmark_llm(
         end_evt.record()
     torch.cuda.synchronize()
 
-    elapsed_s = start_evt.elapsed_time(end_evt) / 1e3
-    tokens_generated = batch * min_new_tokens
+    elapsed_s = start_evt.elapsed_time(end_evt) / 1e3  # seconds
+    tokens_generated = local_batch * min_new_tokens
+    metrics = theoretical_tflops(model, min_new_tokens, seq_len, local_batch, elapsed_s)
 
-    # if os.environ.get("LOCAL_RANK", 0) == 0: 
-    metrics = theoretical_tflops(model, min_new_tokens, seq_len, batch, elapsed_s)
-    cost = estimate_cost_per_1m_tokens(tokens_generated, elapsed_s)
+    ### Collectives
+    # Wrap values in tensors
+    elapsed_tensor = torch.tensor([elapsed_s], device=device)
+    tokens_tensor = torch.tensor([tokens_generated], device=device)
+
+    # Prepare output buffers
+    gathered_elapsed = [torch.zeros_like(elapsed_tensor) for _ in range(world_size)]
+    gathered_tokens = [torch.zeros_like(tokens_tensor) for _ in range(world_size)]
+
+    if (int(os.environ.get("WORLD_SIZE", 1)) > 1):
+        # All-gather across all ranks
+        dist.all_gather(gathered_elapsed, elapsed_tensor)
+        dist.all_gather(gathered_tokens, tokens_tensor)
+
+        cost = 0
+
+        # Only do aggregation on rank 0
+        if rank == 0:
+            all_elapsed = [t.item() for t in gathered_elapsed]
+            all_tokens = [t.item() for t in gathered_tokens]
+
+            total_tokens = sum(all_tokens)
+            avg_time = sum(all_elapsed) / len(all_elapsed)
+            cost = estimate_cost_per_1m_tokens(total_tokens, avg_time)
+    else:
+        cost = estimate_cost_per_1m_tokens(tokens_generated, elapsed_s)
 
     # Cleanup
     del model, tok, inputs, prompt_ids
@@ -239,6 +258,7 @@ def benchmark_llm(
     gc.collect()
 
     return elapsed_s, tokens_generated, metrics, cost
+
 
 
 def theoretical_tflops(
@@ -293,15 +313,17 @@ def estimate_cost_per_1m_tokens(
 
     # Only print on rank 1
     if int(os.environ.get("LOCAL_RANK", 0)) == 0:
+        print(f"--------- OUTPUT BREAKDOWN ---------")
         print(f"🧠 Tokens generated: {tokens_generated}")
         print(f"⚡ Throughput: {throughput:.5f} tokens/sec")
         print(f"⏱️ Total time: {elapsed:.5f} sec")
         print(f"💸 Cost per 1M tokens: ${cost_per_1m:.5f}")
+        print(f"------------------------------------")
+
 
     return cost_per_1m
 
-def reset_distributed_and_clear_memory(master_addr: str = "127.0.0.1",
-                                       master_port: str = "12355"):
+def reset_distributed_and_clear_memory():
     """
     Tear down any existing NCCL process group, kill leftover listeners on master_port,
     unset MASTER_ADDR/MASTER_PORT, and free Python & CUDA memory.
@@ -313,30 +335,21 @@ def reset_distributed_and_clear_memory(master_addr: str = "127.0.0.1",
     import torch
     import torch.distributed as dist
 
+    master_addr = os.environ.get("MASTER_ADDR", "127.0.0.1")
+    master_port = os.environ.get("MASTER_PORT", "12355")
+
     # 1) Destroy any existing process group
     if dist.is_available() and dist.is_initialized():
         dist.destroy_process_group()
+        print("✅ Destroyed process group.")
 
     # 2) Kill any OS process listening on master_port
-    try:
-        pids = subprocess.check_output(
-            f"lsof -ti tcp:{master_port}", shell=True
-        ).decode().split()
-        for pid in pids:
-            os.kill(int(pid), signal.SIGKILL)
-    except subprocess.CalledProcessError:
-        pass
+    _cleanup_all()
 
     # 3) Unset environment variables
     os.environ.pop("MASTER_ADDR", None)
     os.environ.pop("MASTER_PORT", None)
-
-    # 4) Clear Python GC
-    gc.collect()
-
-    # 5) Clear PyTorch/CUDA caches
-    torch.cuda.empty_cache()
-    torch.cuda.ipc_collect()
+   
 
     print("✅ Distributed env torn down and memory cleared.")
 
@@ -349,12 +362,14 @@ def _distributed_worker(
     min_new_tokens: int,
     batch_sizes: list[int],
     dtype: torch.dtype,
-    sharding: str,
+    sharding: bool ,
     world_size: int,
+    ds_config: dict,
     shared_results
 ):
     # 1️⃣ Tell DeepSpeed/PyTorch what our local rank is
     os.environ["LOCAL_RANK"] = str(rank)
+    os.environ["WORLD_SIZE"] = str(world_size)
     
     # 2️⃣ Bind this process to GPU `rank`
     torch.cuda.set_device(rank)
@@ -368,12 +383,12 @@ def _distributed_worker(
         dtype=dtype,
         sharding=sharding,
         world_size=world_size,
-        rank=rank
+        rank=rank,
+        ds_config=ds_config
     )
     # Only rank 0 writes
     if rank == 0:
         shared_results.extend(res)
-
 
 
 # 2) Launcher
@@ -383,8 +398,9 @@ def run_distributed_benchmark(
     min_new_tokens: int,
     batch_sizes: list[int],
     dtype: torch.dtype,
-    sharding: str,
+    sharding: bool,
     world_size: int,
+    ds_config: dict,
 ):
     mp.set_start_method("fork", force=True)
     
@@ -401,6 +417,7 @@ def run_distributed_benchmark(
                 dtype,
                 sharding,
                 world_size,
+                ds_config,
                 shared_results
             ),
             nprocs=world_size,
@@ -410,88 +427,16 @@ def run_distributed_benchmark(
         return list(shared_results)
 
 
-def _llama_worker(rank, model_name, ds_config_path, max_new_tokens, seq_len, world_size, data_size, shared_results):
-    os.environ["LOCAL_RANK"] = str(rank)
-    os.environ["RANK"] = str(rank)
-    os.environ["WORLD_SIZE"] = str(world_size)
-    os.environ["LOCAL_RANK"] = str(rank)
-    os.environ["MASTER_ADDR"] = "127.0.0.1"
-    os.environ["MASTER_PORT"] = os.environ.get("MASTER_PORT", "29501")  # use a non-default port
-    redirect_output_to_file(rank)
-
-    torch.cuda.set_device(rank)
-
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16)
-
-    model_engine, _, _, _ = deepspeed.initialize(model=model, config=ds_config_path)
-
-    # Generate local share of prompts
-    prompts_per_rank = data_size // world_size
-    remainder = data_size % world_size
-    if rank < remainder:
-        prompts_per_rank += 1
-
-    prompt = "DeepSpeed is " + "great " * (seq_len // 2)
-
-    local_outputs = []
-    start = time.time()
-    for _ in range(prompts_per_rank):
-        inputs = tokenizer(prompt, return_tensors="pt").to(model_engine.device)
-        with torch.no_grad():
-            outputs = model_engine.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                pad_token_id=tokenizer.eos_token_id
-            )
-            decoded = tokenizer.decode(outputs[0], skip_special_tokens=True)
-            local_outputs.append(decoded)
-    end = time.time()
-
-    if rank == 0:
-        shared_results.append({
-            "outputs": local_outputs,
-            "elapsed": end - start
-        })
-
 def redirect_output_to_file(rank):
     log_dir = "logs"
     os.makedirs(log_dir, exist_ok=True)
     log_file = os.path.join(log_dir, f"ds_worker_{rank}.log")
 
-    sys.stdout.flush()
-    sys.stderr.flush()
-    log_fd = os.open(log_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
-    os.dup2(log_fd, sys.stdout.fileno())
-    os.dup2(log_fd, sys.stderr.fileno())
+    for handler in logging.root.handlers[:]:
+        logging.root.removeHandler(handler)
 
-
-def run_deepspeed_inference(model_name: str,
-                            ds_config: dict,
-                            world_size: int = 2,
-                            max_new_tokens: int = 50,
-                            seq_len: int = 32,
-                            data_size: int = 10):
-    mp.set_start_method("fork", force=True)
-
-    with Manager() as manager:
-        shared_results = manager.list()
-        results_dir = "results"
-        os.makedirs(results_dir, exist_ok=True)
-        ds_config_path = "results/ds_temp_config.json"
-        with open(ds_config_path, "w") as f:
-            json.dump(ds_config, f)
-
-        mp.spawn(
-            _llama_worker,
-            args=(model_name, ds_config_path, max_new_tokens, seq_len, world_size, data_size, shared_results),
-            nprocs=world_size,
-            join=True,
-        )
-
-        os.remove(ds_config_path)
-
-        # Only rank 0 appends output, so return first element
-        result = shared_results[0] if shared_results else {}
-        print(f"Inference completed in {result.get('elapsed', 0):.2f} seconds with a World Size={world_size}.")
-        return result.get("outputs", [])
+    logging.basicConfig(
+        filename=log_file,
+        level=logging.WARNING,  # or INFO
+        format="%(asctime)s %(levelname)s %(message)s"
+    )
