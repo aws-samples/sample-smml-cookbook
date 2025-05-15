@@ -2,7 +2,7 @@
 
 These labs are meant to demystify the processes of distributing ML workloads for Inference and Training across multiple accelerators and devices. 
 
-We will take on the task of running a model from a very small size (llama-tiny) to a larger distributed model across multiple instances (llama-7b).
+We will take on the task of running a model from a very small size (llama) to a larger distributed model across multiple instances (llama-13b).
 
 Throughout this workshop we will begin by deploying a simple version of the model we'll explore, then establish concepts using generic matrix multiplications. We do this because *most* modern machine learning algorithms consist almost entirely of matrix multiplications. Once you understand the concept of how a matrix multiplication is optimize, you should be able to easily transfer that understanding to the models you run.
 
