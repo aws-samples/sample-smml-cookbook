@@ -13,6 +13,6 @@ Here's an overview of the labs:
 ## [Module 1](./01_Leveraging_Hardware)
 We will run llama-1b on a single GPU, then show the core concepts for optimizing a workload on a *single* gpu using a generic matrix multiplication. We will cover the roofline model, algorithmic intensity and how to fully utilize your accelerators. Then finally apply some of those concepts to llama to see some improvements.
 
-## [Module 2](./02_Multi-Accelerator_Distribution)
+## [Module 2](./02_Multi-Acclerator_Distribution)
 We will run a larger model (llama-13b) to utilize 4 GPUs. Then we will show base concepts of compute parallelism, data parallelism, scaling laws, distribution frameworks, and finally we'll run llama-13b with some of these concepts in mind.
 
