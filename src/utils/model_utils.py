@@ -116,6 +116,40 @@ def _cleanup_all():
     torch.cuda.ipc_collect()
     gc.collect()
 
+# def load_sharded_model(
+#     model_name: str,
+#     dtype: torch.dtype,
+#     sharding: bool = False,
+#     world_size: int = 1,
+#     ds_config: dict = {}
+# ) -> torch.nn.Module:
+#     try:
+#         # single‑GPU path
+#         if not sharding:
+#             model = AutoModelForCausalLM.from_pretrained(
+#                 model_name, torch_dtype=dtype
+#             )
+#             model = model.to(torch.cuda.current_device()).eval()
+#             return model
+
+#         # DeepSpeed‑inference path
+#         model = AutoModelForCausalLM.from_pretrained(
+#             model_name, torch_dtype=dtype
+#         )
+#         model.eval()
+#         ds_engine = deepspeed.init_inference(
+#             model,
+#             config=ds_config,
+#             dtype=dtype,
+#             replace_method="auto",
+#         )
+#         return ds_engine.module
+
+#     except Exception as e:
+#         _cleanup_all()
+#         print(f"load failed: {e}")
+#         return None
+
 def load_sharded_model(
     model_name: str,
     dtype: torch.dtype,
@@ -124,31 +158,27 @@ def load_sharded_model(
     ds_config: dict = {}
 ) -> torch.nn.Module:
     try:
-        # single‑GPU path
-        if not sharding:
-            model = AutoModelForCausalLM.from_pretrained(
-                model_name, torch_dtype=dtype
-            )
-            model = model.to(torch.cuda.current_device()).eval()
-            return model
+        model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=dtype)
 
-        # DeepSpeed‑inference path
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name, torch_dtype=dtype
+        if not sharding:
+            return model.to(torch.cuda.current_device()).train()
+
+        # Training path using DeepSpeed
+        model = model.to(torch.cuda.current_device())
+        model.train()
+
+        model_engine, _, _, _ = deepspeed.initialize(
+            model=model,
+            model_parameters=model.parameters(),
+            config=ds_config
         )
-        model.eval()
-        ds_engine = deepspeed.init_inference(
-            model,
-            config=ds_config,
-            dtype=dtype,
-            replace_method="auto",
-        )
-        return ds_engine.module
+        return model_engine
 
     except Exception as e:
         _cleanup_all()
         print(f"load failed: {e}")
         return None
+
 
 def shard_list(data, rank, world_size):
     total = len(data)
@@ -168,96 +198,196 @@ def benchmark_llm(
     world_size: int = 1,
     ds_config: dict = {}
 ):
-    """
-    Benchmark a single forward pass (prompt + generation) across multiple GPUs using data parallelism.
-    Returns elapsed GPU seconds (per rank), tokens generated (per rank), metrics, and cost.
-    """
-
-    # Identify rank and device
     rank = int(os.environ.get("LOCAL_RANK", 0))
     device = torch.device(f"cuda:{rank}")
-    
-    # Load tokenizer and model
-    
+
     tok.pad_token = tok.eos_token
-   
-    model.config.use_cache = False
+    # model.config.use_cache = False
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.enabled = False
 
-    # Prepare rank-local prompts
-    prompts = [tok.bos_token + ''.join(random.choices(string.ascii_letters, k=seq_len - 1)) for _ in range(batch)]
+    # Build training prompts and targets
+    prompts = [tok.bos_token + ''.join(random.choices(string.ascii_letters, k=seq_len + min_new_tokens - 1)) for _ in range(batch)]
     
-    # Pad prompts so batch is divisible by world_size
+    # Ensure divisibility for world_size
     if batch % world_size != 0:
         pad = world_size - (batch % world_size)
-        for _ in range(pad):
-            prompts.append(prompts[-1])  # duplicate last
+        prompts += [prompts[-1]] * pad
 
-    
     local_prompts = shard_list(prompts, rank, world_size)
-    inputs = tok(local_prompts, return_tensors="pt", padding=True).to(device)
-    local_batch = len(local_prompts)
+    tokenized = tok(local_prompts, return_tensors="pt", padding=True, truncation=True).to(device)
 
-    # Warm-up
-    with torch.inference_mode():
-        for _ in range(3):
-            _ = model(**inputs)
+    input_ids = tokenized["input_ids"]
+    attention_mask = tokenized["attention_mask"]
+    labels = input_ids.clone()
+    print(f"[Rank {rank}] input_ids.shape: {input_ids.shape}")
+    print(f"[Rank {rank}] Allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
+    print(f"[Rank {rank}] Reserved:  {torch.cuda.memory_reserved() / 1e9:.2f} GB")
+
+    # Warm-up step
+    for _ in range(2):
+        outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+        loss = outputs.loss
+        if hasattr(model, 'backward'):
+            model.backward(loss)
+            model.step()
+        else:
+            loss.backward()
+            model.zero_grad()
+
     torch.cuda.synchronize()
-
-    # Simulate new tokens
-    prompt_ids = torch.randint(
-        1, tok.vocab_size - 1,
-        (local_batch, seq_len + min_new_tokens),
-        device=device
-    )
-
     start_evt, end_evt = torch.cuda.Event(True), torch.cuda.Event(True)
-    with torch.inference_mode():
-        start_evt.record()
-        _ = model(prompt_ids)
-        end_evt.record()
+
+    start_evt.record()
+    outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+    loss = outputs.loss
+    if hasattr(model, 'backward'):
+        model.backward(loss)
+        model.step()
+    else:
+        loss.backward()
+        model.zero_grad()
+    end_evt.record()
+
     torch.cuda.synchronize()
 
-    elapsed_s = start_evt.elapsed_time(end_evt) / 1e3  # seconds
-    tokens_generated = local_batch * min_new_tokens
-    metrics = theoretical_tflops(model, min_new_tokens, seq_len, local_batch, elapsed_s)
+    elapsed_s = start_evt.elapsed_time(end_evt) / 1e3
+    tokens_generated = input_ids.numel()
 
-    ### Collectives
-    # Wrap values in tensors
+    metrics = theoretical_tflops(model, min_new_tokens, seq_len, input_ids.size(0), elapsed_s)
+
+    # Gather across ranks
     elapsed_tensor = torch.tensor([elapsed_s], device=device)
     tokens_tensor = torch.tensor([tokens_generated], device=device)
 
-    # Prepare output buffers
     gathered_elapsed = [torch.zeros_like(elapsed_tensor) for _ in range(world_size)]
     gathered_tokens = [torch.zeros_like(tokens_tensor) for _ in range(world_size)]
 
-    if (int(os.environ.get("WORLD_SIZE", 1)) > 1):
-        # All-gather across all ranks
+    if world_size > 1:
         dist.all_gather(gathered_elapsed, elapsed_tensor)
         dist.all_gather(gathered_tokens, tokens_tensor)
-
-        cost = 0
-
-        # Only do aggregation on rank 0
         if rank == 0:
             all_elapsed = [t.item() for t in gathered_elapsed]
             all_tokens = [t.item() for t in gathered_tokens]
-
             total_tokens = sum(all_tokens)
             avg_time = sum(all_elapsed) / len(all_elapsed)
             cost = estimate_cost_per_1m_tokens(total_tokens, avg_time)
+        else:
+            cost = 0.0
     else:
         cost = estimate_cost_per_1m_tokens(tokens_generated, elapsed_s)
 
     # Cleanup
-    del model, tok, inputs, prompt_ids
+    del model, tok, input_ids, attention_mask, labels, outputs
     torch.cuda.empty_cache()
     torch.cuda.ipc_collect()
     gc.collect()
 
     return elapsed_s, tokens_generated, metrics, cost
+
+
+# def benchmark_llm(
+#     model,
+#     tok,
+#     batch: int,
+#     seq_len: int,
+#     min_new_tokens: int,
+#     dtype=torch.bfloat16,
+#     sharding: bool = False,
+#     world_size: int = 1,
+#     ds_config: dict = {}
+# ):
+#     """
+#     Benchmark a single forward pass (prompt + generation) across multiple GPUs using data parallelism.
+#     Returns elapsed GPU seconds (per rank), tokens generated (per rank), metrics, and cost.
+#     """
+
+#     # Identify rank and device
+#     rank = int(os.environ.get("LOCAL_RANK", 0))
+#     device = torch.device(f"cuda:{rank}")
+    
+#     # Load tokenizer and model
+    
+#     tok.pad_token = tok.eos_token
+   
+#     model.config.use_cache = False
+#     torch.backends.cuda.matmul.allow_tf32 = False
+#     torch.backends.cudnn.benchmark = False
+#     torch.backends.cudnn.enabled = False
+
+#     # Prepare rank-local prompts
+#     prompts = [tok.bos_token + ''.join(random.choices(string.ascii_letters, k=seq_len - 1)) for _ in range(batch)]
+    
+#     # Pad prompts so batch is divisible by world_size
+#     if batch % world_size != 0:
+#         pad = world_size - (batch % world_size)
+#         for _ in range(pad):
+#             prompts.append(prompts[-1])  # duplicate last
+
+    
+#     local_prompts = shard_list(prompts, rank, world_size)
+#     inputs = tok(local_prompts, return_tensors="pt", padding=True).to(device)
+#     local_batch = len(local_prompts)
+
+#     # Warm-up
+#     with torch.inference_mode():
+#         for _ in range(3):
+#             _ = model(**inputs)
+#     torch.cuda.synchronize()
+
+#     # Simulate new tokens
+#     prompt_ids = torch.randint(
+#         1, tok.vocab_size - 1,
+#         (local_batch, seq_len + min_new_tokens),
+#         device=device
+#     )
+
+#     start_evt, end_evt = torch.cuda.Event(True), torch.cuda.Event(True)
+#     with torch.inference_mode():
+#         start_evt.record()
+#         _ = model(prompt_ids)
+#         end_evt.record()
+#     torch.cuda.synchronize()
+
+#     elapsed_s = start_evt.elapsed_time(end_evt) / 1e3  # seconds
+#     tokens_generated = local_batch * min_new_tokens
+#     metrics = theoretical_tflops(model, min_new_tokens, seq_len, local_batch, elapsed_s)
+
+#     ### Collectives
+#     # Wrap values in tensors
+#     elapsed_tensor = torch.tensor([elapsed_s], device=device)
+#     tokens_tensor = torch.tensor([tokens_generated], device=device)
+
+#     # Prepare output buffers
+#     gathered_elapsed = [torch.zeros_like(elapsed_tensor) for _ in range(world_size)]
+#     gathered_tokens = [torch.zeros_like(tokens_tensor) for _ in range(world_size)]
+
+#     if (int(os.environ.get("WORLD_SIZE", 1)) > 1):
+#         # All-gather across all ranks
+#         dist.all_gather(gathered_elapsed, elapsed_tensor)
+#         dist.all_gather(gathered_tokens, tokens_tensor)
+
+#         cost = 0
+
+#         # Only do aggregation on rank 0
+#         if rank == 0:
+#             all_elapsed = [t.item() for t in gathered_elapsed]
+#             all_tokens = [t.item() for t in gathered_tokens]
+
+#             total_tokens = sum(all_tokens)
+#             avg_time = sum(all_elapsed) / len(all_elapsed)
+#             cost = estimate_cost_per_1m_tokens(total_tokens, avg_time)
+#     else:
+#         cost = estimate_cost_per_1m_tokens(tokens_generated, elapsed_s)
+
+#     # Cleanup
+#     del model, tok, inputs, prompt_ids
+#     torch.cuda.empty_cache()
+#     torch.cuda.ipc_collect()
+#     gc.collect()
+
+#     return elapsed_s, tokens_generated, metrics, cost
 
 
 
@@ -272,19 +402,25 @@ def theoretical_tflops(
     """
     Compute FLOPs, bandwidth, and arithmetic intensity for one forward.
     """
+    # 1) get flat list of params
     params = sum(p.numel() for p in model.parameters())
     dtype_bytes = torch.finfo(next(model.parameters()).dtype).bits // 8
     tokens = seq_len + min_new_tokens
-    hidden = model.config.hidden_size
 
+    # 2) unwrap DeepSpeedEngine if needed
+    base_model = model.module if hasattr(model, "module") else model
+    hidden = base_model.config.hidden_size
+
+    # 3) compute FLOPs & bytes
     flops = 2 * params * batch * tokens
     weight_bytes = params * dtype_bytes
     kv_bytes = batch * seq_len * hidden * dtype_bytes * 2
     out_bytes = batch * min_new_tokens * hidden * dtype_bytes
     bytes_moved = weight_bytes + kv_bytes + out_bytes
+
     arith_int = flops / bytes_moved
     tflops_s = flops / elapsed_s / 1e12
-    
+
     if int(os.environ.get("LOCAL_RANK", 0)) == 0:
         print(f"Batch={batch} | Seq={seq_len}+{min_new_tokens}")
         print(f"Elapsed GPU time: {elapsed_s:.4f}s | TFLOP/s: {tflops_s:.1f} | AI: {arith_int:.2f} FLOP/B")
@@ -387,8 +523,10 @@ def _distributed_worker(
         ds_config=ds_config
     )
     # Only rank 0 writes
-    if rank == 0:
+    if rank == 0 and res is not None:
         shared_results.extend(res)
+    elif rank == 0:
+        print("❌ Benchmark returned None; skipping.")
 
 
 # 2) Launcher
