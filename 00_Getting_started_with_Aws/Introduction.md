@@ -81,4 +81,6 @@ Throughout this cookbook, you'll find both recommended (core) content and bonus 
 
 Let's begin by exploring the components that make up a language model like Llama...
 
-![Roadmap Screenshot](./roadmap.png)
+<p align="center">
+   <img src="./roadmap.png" alt="drawing" width="200"/>
+</p>
