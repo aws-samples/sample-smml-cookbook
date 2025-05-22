@@ -1,4 +1,4 @@
-# Welcome to the Self Managed Machine Learning Cookbook.
+# Welcome to the Self Managed Machine Learning Cookbook (WIP RELEASE).
 
 These labs are meant to demystify the processes of distributing ML workloads for Inference and Training across multiple accelerators and devices. 
 
