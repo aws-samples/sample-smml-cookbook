@@ -19,7 +19,7 @@ from math import ceil
 import multiprocessing.util
 import subprocess
 import psutil
-from transformers import AdamW
+from torch.optim import AdamW
 from deepspeed.pipe import PipelineModule
 multiprocessing.util.log_to_stderr().setLevel("ERROR")
 
