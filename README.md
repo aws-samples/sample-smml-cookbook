@@ -15,4 +15,3 @@ We will run llama-1b on a single GPU, then show the core concepts for optimizing
 
 ## [Module 2](./02_Multi-Acclerator_Distribution)
 We will run a larger model (llama-13b) to utilize 4 GPUs. Then we will show base concepts of compute parallelism, data parallelism, scaling laws, distribution frameworks, and finally we'll run llama-13b with some of these concepts in mind.
-
