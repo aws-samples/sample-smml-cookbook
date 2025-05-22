@@ -107,7 +107,7 @@ def distributed_run_test_suite(world_size, test_cases, warmup_iters=2, iters=5, 
         local_flops = calculate_chain_flops(B, D, F, L)
         local_mem_bytes = calculate_memory_bytes(B, D, F, L)
         local_ai = local_flops / local_mem_bytes if local_mem_bytes != 0 else float('inf')
-        local_gflops = local_flops / avg_time / 1e9
+        tflops_s = local_flops / avg_time / 1e12
 
         # Compute aggregated values across GPUs.
         aggregated_flops = local_flops * world_size
@@ -115,7 +115,7 @@ def distributed_run_test_suite(world_size, test_cases, warmup_iters=2, iters=5, 
         aggregated_ai = aggregated_flops / aggregated_mem_bytes if aggregated_mem_bytes != 0 else float('inf')
 
         # Sum local GFLOPS across GPUs.
-        gflops_tensor = torch.tensor([local_gflops], device=torch.device(f"cuda:{rank}"))
+        gflops_tensor = torch.tensor([tflops_s], device=torch.device(f"cuda:{rank}"))
         dist.all_reduce(gflops_tensor, op=dist.ReduceOp.SUM)
         aggregated_gflops = gflops_tensor.item()
 
@@ -126,7 +126,7 @@ def distributed_run_test_suite(world_size, test_cases, warmup_iters=2, iters=5, 
             "F": F,
             "num_layers": L,
             "avg_time_seconds": avg_time,
-            "local_gflops": local_gflops,
+            "tflops_s": tflops_s,
             "aggregated_gflops": aggregated_gflops,
             "total_flops": aggregated_flops,                # now aggregated across GPUs
             "estimated_memory_bytes": aggregated_mem_bytes,   # aggregated memory traffic
@@ -135,7 +135,7 @@ def distributed_run_test_suite(world_size, test_cases, warmup_iters=2, iters=5, 
         results.append(result)
         if rank == 0:
             print(f"PASSED: B={B}, D={D}, F={F}, layers={L}")
-            print(f"  Local GFLOPs: {local_gflops:.2f}  |  Aggregated GFLOPs: {aggregated_gflops:.2f}")
+            print(f"  Local TFLOPs: {tflops_s:.2f}  |  Aggregated GFLOPs: {aggregated_gflops:.2f}")
             print(f"  Total FLOPs: {aggregated_flops:.2e}  |  Estimated Memory: {aggregated_mem_bytes:.2e}")
             print(f"  Arithmetic Intensity: {aggregated_ai:.3f}")
             print("-" * 80)

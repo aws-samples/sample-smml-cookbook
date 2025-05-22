@@ -16,7 +16,7 @@ def plot_points_from_results(results, color=None):
     if color is not None:
         for entry in results:
             x = entry["arithmetic_intensity"]
-            y = (entry["total_flops"] / entry["avg_time_seconds"]) / 1e12
+            y = entry["tflops_s"]
             label = f"WS={entry.get('world_size')},B={entry.get('batch_size')},D={entry.get('D')},F={entry.get('F')},L={entry.get('num_layers')}"
             plt.scatter(x, y, s=80, color=color)
             plt.annotate(
@@ -27,7 +27,7 @@ def plot_points_from_results(results, color=None):
         cmap = plt.get_cmap("tab10")
         for i, entry in enumerate(results):
             x = entry["arithmetic_intensity"]
-            y = (entry["total_flops"] / entry["avg_time_seconds"]) / 1e12
+            y = entry["tflops_s"]
             label = f"WS={entry.get('world_size')},B={entry.get('batch_size')},D={entry.get('D')},F={entry.get('F')},L={entry.get('num_layers')}"
             plt.scatter(x, y, s=80, color=cmap(i % 10))
             plt.annotate(
