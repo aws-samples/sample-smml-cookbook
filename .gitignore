@@ -3,3 +3,4 @@ results/
 logs/
 .vscode
 .venv
+.DS_Store
