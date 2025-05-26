@@ -16,6 +16,44 @@ The original resource is still valuable for those wanting a deeper mathematical 
 
 In general we encourage you to dive into perriferal topics you're unsure of. This complex topic, but complexitiy comes from the many cross-displines. Any individual topic can be learned at a surface level very quickly.
 
+### Q: How do I interpret the the Roofline Model Charts?
+
+A: The roofline plot visualizes your workload's performance relative to hardware limits. Here's how to interpret these important elements:
+
+**The Dots:**
+- "WS" stands for "World Size" (number of GPUs) and "B" indicates batch size
+- Each dot represents a specific configuration's performance measurement
+- Format: `WS=1,B=X,D=4096,F=4096,L=5` where:
+  - WS=1: Using one GPU
+  - B=X: Batch size (varies in different runs)
+  - D/F: Matrix dimensions for the workload
+  - L: Number of layers
+
+**How the Dots Are Calculated:**
+1. **Horizontal position (x-axis)**: Represents Arithmetic Intensity in FLOPs/Byte - calculated as:
+   - Total floating point operations / Total memory bytes accessed
+   - Higher values mean more computation per memory access (more efficient)
+
+2. **Vertical position (y-axis)**: Represents achieved performance in TFLOP/s - calculated as:
+   - Total operations performed / Total execution time
+   - Higher values mean better computational throughput
+
+**What to Look For:**
+- **Dots on the sloped portion** (left side of green line): These configurations are memory-bandwidth limited
+- **Dots on the flat portion** (right side of green line): These configurations are compute-limited
+- **Dots farther up the slope**: Achieving better hardware utilization
+- **Movement from left to right** as batch size increases: Shows how batching improves arithmetic intensity
+
+**The Lines:**
+- **Orange sloped line**: Maximum performance possible at each arithmetic intensity
+- **Red horizontal line** (121.0 TFLOPS): Maximum compute capability of the GPU
+- **Green vertical line** (403.33 FLOPs/Byte): The "ridge point" where the bottleneck shifts from memory to compute
+
+**Practical Interpretation:**
+In the third graph, you can clearly see how increasing batch size moves the dots rightward and upward, showing improved GPU utilization. The goal is to reach configurations that place your workload as close to the "roof" as possible, maximizing your hardware investment.
+
+This visualization demonstrates why batching works: it increases arithmetic intensity by reusing weights for multiple inputs, allowing you to perform more computations per memory access and approach your GPU's theoretical peak performance.
+
 ## Technical Setup Questions
 
 ### Q: More comments about each included library in the imports section
