@@ -1,27 +1,92 @@
-import sys
 import os
 import gc
-import time
 import random
 import string
-import json
 import torch
 import torch.distributed as dist
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 import deepspeed
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from typing import Literal
-import torch.multiprocessing as mp
-from multiprocessing import Manager
-import logging
-import transformers
-from math import ceil
-import multiprocessing.util
-import subprocess
-import psutil
-from torch.optim import AdamW
 from deepspeed.pipe import PipelineModule
+import torch.multiprocessing as mp
+import multiprocessing
+from multiprocessing import Manager
+import psutil
+import logging
+import copy
+
 multiprocessing.util.log_to_stderr().setLevel("ERROR")
+
+BASE_DS_CONFIG = {
+    "zero_optimization": {
+        "stage": 3,
+        "offload_param": {
+            "device": "cpu",
+            "pin_memory": True
+        },
+        "offload_optimizer": {
+            "device": "cpu",
+            "pin_memory": True
+        },
+        "contiguous_gradients": True,
+        "overlap_comm": True
+    },
+    "optimizer": {
+        "type": "AdamW",
+        "params": {
+            "lr": 3e-5,
+            "betas": [0.9, 0.999],
+            "eps": 1e-8,
+            "weight_decay": 0.01
+        }
+    },
+    "replace_with_kernel_inject": False,
+    "enable_cuda_graph": False
+}
+
+def make_ds_config(batch_size=1, grad_steps=1, fp16=True, tensor_parallel=None, pipeline=None, lr=None, world_size=4):
+    config = copy.deepcopy(BASE_DS_CONFIG)
+    config["train_micro_batch_size_per_gpu"] = batch_size
+    config["gradient_accumulation_steps"] = grad_steps
+    config["fp16"] = { "enabled": fp16 }
+
+    if lr is not None:
+        config["optimizer"]["params"]["lr"] = lr
+
+    if tensor_parallel:
+        config["tensor_parallel"] = {
+            "enabled": True,
+            "tp_size": tensor_parallel
+        }
+
+        # pipeline parallel
+    if pipeline:
+        config["pipeline"] = {
+            "enabled": True,
+            "stages": pipeline.get("stages", 1),
+            "partition_method": pipeline.get("partition_method", "parameters"),
+            "activation_checkpoint_interval":
+                pipeline.get("activation_checkpoint_interval", 0)
+        }
+
+        # ==== enforce ZeRO-1 for pipeline ====
+        zo = config.get("zero_optimization", {})
+        # if they were asking for stage2/3, force it down to stage1
+        if zo.get("stage", 0) > 1:
+            zo["stage"] = 1
+            zo.pop("offload_param", None)
+            zo.pop("offload_optimizer", None)
+            # contiguous_gradients/overlap_comm are fine in stage1
+        config["zero_optimization"] = zo
+
+    # (optional) check pp×tp == world_size
+    if world_size and pipeline and tensor_parallel:
+        pp = config["pipeline"]["stages"]
+        tp = config["tensor_parallel"]["tp_size"]
+        if pp * tp != world_size:
+            raise ValueError(f"PP×TP ({pp}×{tp}) must == world_size ({world_size})")
+
+    return config
+
 
 def benchmark_batch_sizes(
     model_name: str,
@@ -151,8 +216,8 @@ def load_sharded_model(
 
 
     # Training path using DeepSpeed
-    model = model.to(torch.cuda.current_device())
-    model.train()
+    # model = model.to(torch.cuda.current_device())
+    # model.train()
 
     model_engine, _, _, _ = deepspeed.initialize(
         model=model,
