@@ -166,10 +166,13 @@ def load_sharded_model(
 
 def shard_list(data, rank, world_size):
     total = len(data)
-    shard_size = ceil(total / world_size)
+    if total == 0:
+        return []
+    shard_size = (total + world_size - 1) // world_size  # ceiling division
     start = rank * shard_size
     end = min(start + shard_size, total)
-    return data[start:end]
+    return data[start:end] if start < total else []
+
 
 def benchmark_llm(
     model,
@@ -201,7 +204,12 @@ def benchmark_llm(
         prompts += [prompts[-1]] * pad
 
     local_prompts = shard_list(prompts, rank, world_size)
+    if not local_prompts:
+        print(f"[Rank {rank}] No data after sharding. Skipping.")
+        return 0.0, 0, {}, 0.0
+
     tokenized = tok(local_prompts, return_tensors="pt", padding=True, truncation=True).to(device)
+
 
     input_ids = tokenized["input_ids"]
     attention_mask = tokenized["attention_mask"]
@@ -230,7 +238,11 @@ def benchmark_llm(
     model.zero_grad()
     max_accum = 4
     accum_steps = min(max_accum, batch) 
-    micro_bs = batch // accum_steps
+    micro_bs = (input_ids.size(0) + accum_steps - 1) // accum_steps  # ceiling division
+    if batch == 0 or accum_steps == 0 or micro_bs == 0:
+        print(f"[Rank {rank}] Invalid batch setup. Skipping.")
+        return 0.0, 0, {}, 0.0
+
     optimizer.zero_grad()
 
     # timed, accumulated step:
