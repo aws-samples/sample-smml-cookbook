@@ -62,6 +62,11 @@ All principles covered can be applied to larger GPUs (like A10G, A100, H100) and
 
 > Note that while we'll discuss how to deploy and run workloads on these clusters, the cookbook links to external guides for the initial cluster setup.
 
+## Why Learn this Content
+<ToDo>
+- As you make higher level decisions this is why you see the behavior that you do
+- Unerstand conversations with customers in depth
+
 ## Key Resources
 
 <!-- * 🧪 [SMML Workshop](https://workshop.example.com/smml) - Hands-on labs and exercises -->

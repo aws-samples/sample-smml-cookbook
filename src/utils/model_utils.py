@@ -6,7 +6,6 @@ import torch
 import torch.distributed as dist
 import deepspeed
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from deepspeed.pipe import PipelineModule
 import torch.multiprocessing as mp
 import multiprocessing
 from multiprocessing import Manager
@@ -43,7 +42,15 @@ BASE_DS_CONFIG = {
     "enable_cuda_graph": False
 }
 
-def make_ds_config(batch_size=1, grad_steps=1, fp16=True, tensor_parallel=None, pipeline=None, lr=None, world_size=4):
+def make_ds_config(
+    batch_size=1,
+    grad_steps=1,
+    fp16=True,
+    tensor_parallel=None,
+    lr=None,
+    world_size=4,
+    zero_config=None
+):
     config = copy.deepcopy(BASE_DS_CONFIG)
     config["train_micro_batch_size_per_gpu"] = batch_size
     config["gradient_accumulation_steps"] = grad_steps
@@ -58,32 +65,8 @@ def make_ds_config(batch_size=1, grad_steps=1, fp16=True, tensor_parallel=None, 
             "tp_size": tensor_parallel
         }
 
-        # pipeline parallel
-    if pipeline:
-        config["pipeline"] = {
-            "enabled": True,
-            "stages": pipeline.get("stages", 1),
-            "partition_method": pipeline.get("partition_method", "parameters"),
-            "activation_checkpoint_interval":
-                pipeline.get("activation_checkpoint_interval", 0)
-        }
-
-        # ==== enforce ZeRO-1 for pipeline ====
-        zo = config.get("zero_optimization", {})
-        # if they were asking for stage2/3, force it down to stage1
-        if zo.get("stage", 0) > 1:
-            zo["stage"] = 1
-            zo.pop("offload_param", None)
-            zo.pop("offload_optimizer", None)
-            # contiguous_gradients/overlap_comm are fine in stage1
-        config["zero_optimization"] = zo
-
-    # (optional) check pp×tp == world_size
-    if world_size and pipeline and tensor_parallel:
-        pp = config["pipeline"]["stages"]
-        tp = config["tensor_parallel"]["tp_size"]
-        if pp * tp != world_size:
-            raise ValueError(f"PP×TP ({pp}×{tp}) must == world_size ({world_size})")
+    if zero_config:
+        config["zero_optimization"] = zero_config
 
     return config
 
@@ -194,27 +177,6 @@ def load_sharded_model(
     if not sharding:
         return model.to(torch.cuda.current_device()).train()
     
-    pipeline_cfg = ds_config.get("pipeline", {})
-    if pipeline_cfg.get("enabled", False):
-        # 1) Extract top‐level submodules into a list
-        layers = [module for _, module in model.named_children()]
-        sequential_model = torch.nn.Sequential(*layers)
-
-        # 2) Read pipeline settings
-        num_stages = pipeline_cfg.get("stages", 1)
-        partition_method = pipeline_cfg.get("partition_method", "parameters")
-        checkpoint_interval = pipeline_cfg.get("activation_checkpoint_interval", 0)
-
-        # 3) Build the PipelineModule
-        model = PipelineModule(
-            layers=list(sequential_model),
-            loss_fn=torch.nn.CrossEntropyLoss(),
-            num_stages=num_stages,
-            partition_method=partition_method,
-            activation_checkpoint_interval=checkpoint_interval
-        )
-
-
     # Training path using DeepSpeed
     # model = model.to(torch.cuda.current_device())
     # model.train()
