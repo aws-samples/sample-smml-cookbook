@@ -15,6 +15,16 @@ Whether you're new to self-managed ML or looking to optimize your existing setup
 * **Scalable Inference**: How to build and manage scalable inference services
 * **Comprehensive Monitoring**: How to observe your ML workloads from cluster level down to individual GPU metrics
 
+### Prerequisite Knowledge
+
+Before starting this lab, you should be familiar with:
+
+* [Basic linear algebra (matrices, matrix multiplication)](https://www.mathsisfun.com/algebra/matrix-introduction.html)
+* [Python programming and PyTorch fundamentals](https://docs.pytorch.org/tutorials/beginner/introyt/introyt1_tutorial.html)
+* [Basic understanding of neural network architectures](https://www.ibm.com/think/topics/neural-networks)
+* Familiarity with [CUDA](https://blogs.nvidia.com/blog/what-is-cuda-2/) and [GPU](https://www.intel.com/content/www/us/en/products/docs/processors/what-is-a-gpu.html) computing concepts
+* Understanding of distributed computing paradigms 
+
 ## Journey Overview
 
 This cookbook follows a practical, hands-on approach with foundational concepts applicable to both training and inference, before diving into specific implementation paths:
