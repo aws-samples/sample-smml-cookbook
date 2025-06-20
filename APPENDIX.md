@@ -19,6 +19,12 @@ typically have a CPU, RAM, and some block storage (like a solid state drive) to 
 - **Cluster:** A cluster is multiple nodes interacting together to solve a job or a request. Examples of AWS technology that can spin up and help you manage clusters are AWS Parallel Cluster, Parallel Computing Service, SageMaker Hyperpod, and Elastic Kubernetes Service.
 
 - **Orchestrator:** An orchestrator or scheduler is used to schedule and manage jobs across a computing environment. This may be scheduling  jobs typically on a compute environment with more than one node. They are responsible for queing jobs, batching jobs together, or splitting jobs across multiple nodes. Some examples are slurm, kubernetes, volcano, and ray.
+## Environment
+We are utilizing the following architecture:
+ToDo
+
+This includes 2 g6.12xlarges each with 4 L4 GPUs on this. This was the smallest most up to date series of GPUs that allow us to demonstrate the majority of the concepts needed to understand the foundations of SMML. We utilize PCS as a simple, lightweight cluster deployment, and install a VSCode server on the head node for easy and interactive interactions with a cluster. We utilize slurm as it is one of the most common orchestrators. Many or all of these can be switches out in your use case, but the core concepts we demonstrate all still apply.
+
 ## Resources
 ### Links
 TBD

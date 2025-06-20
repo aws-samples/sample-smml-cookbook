@@ -22,7 +22,7 @@ Common Tools/Frameworks:
 * SageMaker Training Jobs
 * Ray Train
 
-For hands on examples dive into [Lab1](./module3.trainng.lab1.ipynb)
+For hands on examples dive into [Lab1](./module3.training.lab1.ipynb)
 
 ## Infra Orchestrator
 
