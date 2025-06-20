@@ -8,6 +8,8 @@ Throughout this workshop we will begin by deploying a simple version of the mode
 
 Although we are using a real-life example, we will also dive into the concepts and science behind optimizing these workloads, in a way that ideally will establish a foundation for you to apply these concepts to larger models and larger clusters.
 
+> We encourage you to have the [Appendix](./APPENDIX.md) on the side for additional resources and definitions for common terms we will be using.
+
 Here's an overview of the labs:
 
 ## [Module 1](./01_Leveraging_Hardware)
