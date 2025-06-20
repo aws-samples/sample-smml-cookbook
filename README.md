@@ -30,7 +30,7 @@ Before starting this lab, you should be familiar with:
 This cookbook follows a practical, hands-on approach with foundational concepts applicable to both training and inference, before diving into specific implementation paths:
 
 <p align="center">
-   <img src="/assets/roadmap.png" alt="drawing" width="200"/>
+   <img src="./assets/roadmap.png" alt="drawing" width="200"/>
 </p>
 
 1. **Core ML Infrastructure Concepts** (will do with training but concepts applicable to both training & inference)

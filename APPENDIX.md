@@ -30,11 +30,11 @@ This includes 2 g6.12xlarges each with 4 L4 GPUs on this. This was the smallest 
 TBD
 ### Diagrams
 #### Distributed Computing Environment
-![](/assets/distribution_diagram.png)
+![](./assets/distribution_diagram.png)
 This is the general goal of a distributed environment. Is for the nodes to be conected in some way seemelessly to collaborate on solving some problem.
 #### Cluster
-![](/assets/cluster_diagram.png)
+![](./assets/cluster_diagram.png)
 A visualization of a cluster and how components are nested within each other.
 #### Training Overview
-![](/assets/training_overview.png)
+![](./assets/training_overview.png)
 An overview of how training is broken down with different levels of abstraction to utilize underlying compute.
